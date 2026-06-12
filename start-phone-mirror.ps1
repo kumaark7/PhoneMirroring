@@ -47,7 +47,18 @@ function Get-ReadyDevices {
     [string]$AdbExecutable
   )
 
-  $deviceLines = & $AdbExecutable devices | Select-Object -Skip 1 | Where-Object { $_.Trim() }
+  $devicesResult = Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -Arguments @("devices") -TimeoutSeconds 8
+  if ($devicesResult.TimedOut) {
+    Write-Host "ADB device check timed out. Try again after a few seconds." -ForegroundColor Yellow
+    return @()
+  }
+
+  if ($devicesResult.ExitCode -ne 0) {
+    Write-AdbResult -Result $devicesResult
+    return @()
+  }
+
+  $deviceLines = $devicesResult.Output | Select-Object -Skip 1 | Where-Object { $_.Trim() }
   return @($deviceLines | Where-Object { $_ -match "\sdevice$" })
 }
 
@@ -95,7 +106,7 @@ function Get-WirelessTarget {
     [string]$RequestedIp
   )
 
-  $deviceLines = & $AdbExecutable devices | Select-Object -Skip 1 | Where-Object { $_.Trim() }
+  $deviceLines = Get-ReadyDevices -AdbExecutable $AdbExecutable
   $tcpDevices = @($deviceLines | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+:\d+\s+device$' })
 
   if ($RequestedIp) {
@@ -1063,9 +1074,12 @@ if ($PairWireless) {
 if ($Wireless) {
   Write-Host "Preparing wireless Android mirroring..." -ForegroundColor Cyan
 
-  $readyDevices = Get-ReadyDevices -AdbExecutable $adbPath
-  $usbReadyDevices = @($readyDevices | Where-Object { $_ -notmatch '^\d+\.\d+\.\d+\.\d+:\d+\s+device$' })
-  $usbSerial = Get-DeviceSerial -ReadyDevices $usbReadyDevices
+  $usbSerial = $null
+  if (-not $PhoneIp) {
+    $readyDevices = Get-ReadyDevices -AdbExecutable $adbPath
+    $usbReadyDevices = @($readyDevices | Where-Object { $_ -notmatch '^\d+\.\d+\.\d+\.\d+:\d+\s+device$' })
+    $usbSerial = Get-DeviceSerial -ReadyDevices $usbReadyDevices
+  }
 
   if (-not $PhoneIp) {
     if (-not $usbSerial) {
@@ -1114,7 +1128,7 @@ if ($Wireless) {
   Start-Sleep -Seconds 2
 
   $wirelessTarget = "${PhoneIp}:$Port"
-  $wirelessReady = @((& $adbPath devices | Select-Object -Skip 1 | Where-Object { $_.Trim() }) | Where-Object { $_ -match "^$([regex]::Escape($wirelessTarget))\s+device$" })
+  $wirelessReady = @(Get-ReadyDevices -AdbExecutable $adbPath | Where-Object { $_ -match "^$([regex]::Escape($wirelessTarget))\s+device$" })
   if ($wirelessReady.Count -eq 0) {
     Write-Host "Wireless ADB did not come online yet." -ForegroundColor Yellow
     Write-Host ""
