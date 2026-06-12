@@ -1,0 +1,40 @@
+﻿{
+    "devices":  [
+                    {
+                        "id":  "3478c29",
+                        "createdAt":  "2026-06-12T11:20:27",
+                        "manufacturer":  "Xiaomi",
+                        "lastSeenAt":  "2026-06-12T12:23:43",
+                        "baseSerial":  "3478c29",
+                        "deviceName":  "phoenixin",
+                        "lastConnectionMode":  "Wireless",
+                        "displayName":  "Xiaomi POCO X2",
+                        "effectiveName":  "Xiaomi POCO X2",
+                        "model":  "POCO X2",
+                        "lastKnownIp":  "192.168.31.125",
+                        "lastUsbSerial":  "3478c29",
+                        "lastWirelessPort":  5555,
+                        "lastWirelessTarget":  "192.168.31.125:5555"
+                    },
+                    {
+                        "manufacturer":  "INFINIX",
+                        "id":  "1207031461125214",
+                        "lastSeenAt":  "2026-06-08T01:36:03",
+                        "createdAt":  "2026-06-08T01:36:03",
+                        "displayName":  "INFINIX Infinix X6871",
+                        "lastKnownIp":  "192.168.31.42",
+                        "lastConnectionMode":  "Wireless",
+                        "model":  "Infinix X6871",
+                        "lastWirelessPort":  5555,
+                        "baseSerial":  "1207031461125214",
+                        "effectiveName":  "INFINIX Infinix X6871",
+                        "deviceName":  "Infinix-X6871",
+                        "tag":  null,
+                        "lastPairPort":  null,
+                        "lastWirelessTarget":  "192.168.31.42:5555",
+                        "nickname":  null,
+                        "lastUsbSerial":  null
+                    }
+                ],
+    "lastUpdated":  "2026-06-12T12:23:43"
+}
