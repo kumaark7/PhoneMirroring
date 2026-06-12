@@ -685,10 +685,10 @@ function Get-PatternPoint {
   $index = $Number - 1
   $row = [math]::Floor($index / $GridSize)
   $col = $index % $GridSize
-  $left = [int]($Width * 0.20)
-  $right = [int]($Width * 0.80)
-  $top = [int]($Height * 0.34)
-  $bottom = [int]($Height * 0.74)
+  $left = [int]($Width * 0.25)
+  $right = [int]($Width * 0.75)
+  $top = [int]($Height * 0.26)
+  $bottom = [int]($Height * 0.56)
   $xStep = if ($GridSize -gt 1) { ($right - $left) / ($GridSize - 1) } else { 0 }
   $yStep = if ($GridSize -gt 1) { ($bottom - $top) / ($GridSize - 1) } else { 0 }
 
