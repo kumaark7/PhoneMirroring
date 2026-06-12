@@ -41,6 +41,19 @@ Menu:
 
 Wireless sessions disconnect automatically when the mirror window closes.
 
+Mirror session menu:
+  While the mirror window is open, the PowerShell window stays usable.
+
+  1. Unlock Phone
+  2. Unlock with Saved Credential
+  3. Close Mirror
+  0. Refresh
+
+Unlock methods:
+  PIN and password send text input plus Enter.
+  Pattern unlock supports 3x3, 4x4, and 5x5 grids using numbered points.
+  Saved unlock credentials are stored locally in phone-mirror-unlock.json.
+
 Privacy note:
   Normal scrcpy mirrors the same display shown on the phone. Showing a cover
   image on the phone would also show that cover image on the PC mirror. The

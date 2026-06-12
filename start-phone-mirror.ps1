@@ -12,6 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $deviceStorePath = Join-Path $PSScriptRoot "phone-mirror-devices.json"
+$unlockStorePath = Join-Path $PSScriptRoot "phone-mirror-unlock.json"
 
 function Find-ToolPath {
   param(
@@ -246,6 +247,22 @@ function Get-FriendlyDeviceName {
   }
 
   return ($parts -join " ")
+}
+
+function Get-ConnectedDeviceName {
+  param(
+    [string]$AdbExecutable,
+    [string]$DeviceSerial
+  )
+
+  $manufacturer = Get-DeviceProperty -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -PropertyName "ro.product.manufacturer"
+  $model = Get-DeviceProperty -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -PropertyName "ro.product.model"
+  $friendlyName = Get-FriendlyDeviceName -Manufacturer $manufacturer -Model $model
+  if ($friendlyName) {
+    return $friendlyName
+  }
+
+  return $DeviceSerial
 }
 
 function Read-DeviceStore {
@@ -490,6 +507,321 @@ function Disconnect-WirelessAdb {
   Write-AdbResult -Result $allDisconnect
 }
 
+function Read-PlainTextSecret {
+  param(
+    [string]$Prompt
+  )
+
+  $secureValue = Read-Host $Prompt -AsSecureString
+  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureValue)
+  try {
+    return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+  }
+  finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+  }
+}
+
+function Read-UnlockStore {
+  if (-not (Test-Path $unlockStorePath)) {
+    return [pscustomobject]@{
+      credentials = @()
+      lastUpdated = $null
+    }
+  }
+
+  try {
+    $store = Get-Content -LiteralPath $unlockStorePath -Raw | ConvertFrom-Json
+  }
+  catch {
+    Write-Host "Saved unlock data is damaged, so saved unlocks are unavailable." -ForegroundColor Yellow
+    return $null
+  }
+
+  if (-not $store.credentials) {
+    $store | Add-Member -MemberType NoteProperty -Name credentials -Value @()
+  }
+
+  return $store
+}
+
+function Save-UnlockStore {
+  param(
+    [pscustomobject]$Store
+  )
+
+  $Store.lastUpdated = Get-Date -Format "s"
+  $Store | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $unlockStorePath -Encoding UTF8
+}
+
+function Save-UnlockCredential {
+  param(
+    [string]$DeviceKey,
+    [string]$DeviceName,
+    [string]$Kind,
+    [string]$Value,
+    [int]$GridSize
+  )
+
+  $saveChoice = Read-Host "Save this $Kind for next time? (Y/N)"
+  if ($saveChoice -notmatch '^(y|yes)$') {
+    return
+  }
+
+  $store = Read-UnlockStore
+  if (-not $store) {
+    return
+  }
+
+  $label = Read-Host "Name for this saved unlock"
+  if (-not $label) {
+    $label = "$DeviceName - $Kind"
+  }
+
+  $credentials = @($store.credentials)
+  $credentials += [pscustomobject]@{
+    id = [guid]::NewGuid().ToString()
+    deviceKey = $DeviceKey
+    deviceName = $DeviceName
+    label = $label
+    kind = $Kind
+    value = $Value
+    gridSize = $GridSize
+    createdAt = Get-Date -Format "s"
+  }
+
+  $store.credentials = $credentials
+  Save-UnlockStore -Store $store
+  Write-Host "Saved unlock credential." -ForegroundColor Green
+}
+
+function Get-SavedUnlockCredentials {
+  param(
+    [string]$DeviceKey
+  )
+
+  $store = Read-UnlockStore
+  if (-not $store) {
+    return @()
+  }
+
+  return @($store.credentials | Where-Object { $_.deviceKey -eq $DeviceKey })
+}
+
+function Invoke-WakeAndSwipeUnlock {
+  param(
+    [string]$AdbExecutable,
+    [string]$DeviceSerial
+  )
+
+  Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "input", "keyevent", "WAKEUP") -TimeoutSeconds 3 | Out-Null
+  Start-Sleep -Milliseconds 300
+  Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "input", "swipe", "500", "1800", "500", "600", "250") -TimeoutSeconds 3 | Out-Null
+  Start-Sleep -Milliseconds 300
+}
+
+function ConvertTo-AdbInputText {
+  param(
+    [string]$Text
+  )
+
+  return ($Text -replace ' ', '%s')
+}
+
+function Invoke-TextUnlock {
+  param(
+    [string]$AdbExecutable,
+    [string]$DeviceSerial,
+    [string]$Text
+  )
+
+  Invoke-WakeAndSwipeUnlock -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial
+  $adbText = ConvertTo-AdbInputText -Text $Text
+  Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "input", "text", $adbText) -TimeoutSeconds 5 | Out-Null
+  Start-Sleep -Milliseconds 200
+  Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "input", "keyevent", "ENTER") -TimeoutSeconds 3 | Out-Null
+}
+
+function Get-DeviceScreenSize {
+  param(
+    [string]$AdbExecutable,
+    [string]$DeviceSerial
+  )
+
+  $result = Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "wm", "size") -TimeoutSeconds 3
+  $line = ($result.Output | Select-Object -First 1)
+  if ($line -match '(\d+)x(\d+)') {
+    return [pscustomobject]@{
+      Width = [int]$matches[1]
+      Height = [int]$matches[2]
+    }
+  }
+
+  return [pscustomobject]@{
+    Width = 1080
+    Height = 2400
+  }
+}
+
+function Get-PatternPoint {
+  param(
+    [int]$Number,
+    [int]$GridSize,
+    [int]$Width,
+    [int]$Height
+  )
+
+  $index = $Number - 1
+  $row = [math]::Floor($index / $GridSize)
+  $col = $index % $GridSize
+  $left = [int]($Width * 0.20)
+  $right = [int]($Width * 0.80)
+  $top = [int]($Height * 0.34)
+  $bottom = [int]($Height * 0.74)
+  $xStep = if ($GridSize -gt 1) { ($right - $left) / ($GridSize - 1) } else { 0 }
+  $yStep = if ($GridSize -gt 1) { ($bottom - $top) / ($GridSize - 1) } else { 0 }
+
+  return [pscustomobject]@{
+    X = [int]($left + ($col * $xStep))
+    Y = [int]($top + ($row * $yStep))
+  }
+}
+
+function Invoke-PatternUnlock {
+  param(
+    [string]$AdbExecutable,
+    [string]$DeviceSerial,
+    [int]$GridSize,
+    [string]$Pattern
+  )
+
+  $numbers = @($Pattern -split '[,\s]+' | Where-Object { $_ } | ForEach-Object { [int]$_ })
+  if ($numbers.Count -lt 2) {
+    Write-Host "Pattern needs at least two points." -ForegroundColor Yellow
+    return
+  }
+
+  $max = $GridSize * $GridSize
+  foreach ($number in $numbers) {
+    if ($number -lt 1 -or $number -gt $max) {
+      Write-Host "Pattern point $number is outside a $GridSize x $GridSize grid." -ForegroundColor Red
+      return
+    }
+  }
+
+  Invoke-WakeAndSwipeUnlock -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial
+  $size = Get-DeviceScreenSize -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial
+  $points = @($numbers | ForEach-Object { Get-PatternPoint -Number $_ -GridSize $GridSize -Width $size.Width -Height $size.Height })
+
+  $first = $points[0]
+  Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "input", "motionevent", "DOWN", "$($first.X)", "$($first.Y)") -TimeoutSeconds 3 | Out-Null
+  Start-Sleep -Milliseconds 120
+
+  for ($i = 1; $i -lt $points.Count; $i++) {
+    $point = $points[$i]
+    Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "input", "motionevent", "MOVE", "$($point.X)", "$($point.Y)") -TimeoutSeconds 3 | Out-Null
+    Start-Sleep -Milliseconds 120
+  }
+
+  $last = $points[-1]
+  Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "input", "motionevent", "UP", "$($last.X)", "$($last.Y)") -TimeoutSeconds 3 | Out-Null
+}
+
+function Invoke-UnlockCredential {
+  param(
+    [string]$AdbExecutable,
+    [string]$DeviceSerial,
+    [pscustomobject]$Credential
+  )
+
+  switch ($Credential.kind) {
+    "PIN" { Invoke-TextUnlock -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Text $Credential.value }
+    "Password" { Invoke-TextUnlock -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Text $Credential.value }
+    "Pattern" { Invoke-PatternUnlock -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -GridSize ([int]$Credential.gridSize) -Pattern $Credential.value }
+  }
+}
+
+function Show-SavedUnlockMenu {
+  param(
+    [string]$AdbExecutable,
+    [string]$DeviceSerial,
+    [string]$DeviceKey
+  )
+
+  $credentials = Get-SavedUnlockCredentials -DeviceKey $DeviceKey
+  if ($credentials.Count -eq 0) {
+    Write-Host "No saved unlock credentials for this device." -ForegroundColor Yellow
+    return
+  }
+
+  Write-Host ""
+  Write-Host "Saved Unlock Credentials" -ForegroundColor Cyan
+  for ($i = 0; $i -lt $credentials.Count; $i++) {
+    $credential = $credentials[$i]
+    Write-Host "$($i + 1). $($credential.label) [$($credential.kind)]"
+  }
+  Write-Host "0. Back"
+  $choice = Read-Host "Select saved unlock"
+  if ($choice -eq "0") {
+    return
+  }
+
+  $index = 0
+  if (-not [int]::TryParse($choice, [ref]$index) -or $index -lt 1 -or $index -gt $credentials.Count) {
+    return
+  }
+
+  Invoke-UnlockCredential -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Credential $credentials[$index - 1]
+}
+
+function Show-ManualUnlockMenu {
+  param(
+    [string]$AdbExecutable,
+    [string]$DeviceSerial,
+    [string]$DeviceKey,
+    [string]$DeviceName
+  )
+
+  while ($true) {
+    Write-Host ""
+    Write-Host "Unlock Phone" -ForegroundColor Cyan
+    Write-Host "1. PIN"
+    Write-Host "2. Password"
+    Write-Host "3. Pattern 3x3"
+    Write-Host "4. Pattern 4x4"
+    Write-Host "5. Pattern 5x5"
+    Write-Host "0. Back"
+    $choice = Read-Host "Select unlock type"
+
+    if ($choice -eq "0") {
+      return
+    }
+
+    if ($choice -eq "1") {
+      $pin = Read-PlainTextSecret -Prompt "Enter PIN"
+      Invoke-TextUnlock -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Text $pin
+      Save-UnlockCredential -DeviceKey $DeviceKey -DeviceName $DeviceName -Kind "PIN" -Value $pin -GridSize 0
+      return
+    }
+
+    if ($choice -eq "2") {
+      $password = Read-PlainTextSecret -Prompt "Enter password"
+      Invoke-TextUnlock -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Text $password
+      Save-UnlockCredential -DeviceKey $DeviceKey -DeviceName $DeviceName -Kind "Password" -Value $password -GridSize 0
+      return
+    }
+
+    if ($choice -in @("3", "4", "5")) {
+      $gridSize = [int]$choice
+      Write-Host "Use numbers 1 to $($gridSize * $gridSize), left-to-right and top-to-bottom." -ForegroundColor Yellow
+      $pattern = Read-Host "Enter pattern numbers"
+      Invoke-PatternUnlock -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -GridSize $gridSize -Pattern $pattern
+      Save-UnlockCredential -DeviceKey $DeviceKey -DeviceName $DeviceName -Kind "Pattern" -Value $pattern -GridSize $gridSize
+      return
+    }
+  }
+}
+
 function Get-RotationValue {
   param(
     [string]$RotateOption
@@ -514,6 +846,8 @@ function Start-ScrcpySession {
     [string]$AdbExecutable,
     [string]$ScrcpyExecutable,
     [string]$DeviceSerial,
+    [string]$DeviceName,
+    [string]$DeviceKey,
     [string[]]$ConnectionArguments,
     [scriptblock]$OnSessionClosed
   )
@@ -535,10 +869,54 @@ function Start-ScrcpySession {
 
   $scrcpyExitCode = 0
   $dimState = Enable-DimPhoneScreen -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial
+  $process = $null
 
   try {
-    & $ScrcpyExecutable @scrcpyArgs
-    $scrcpyExitCode = $LASTEXITCODE
+    $process = Start-Process -FilePath $ScrcpyExecutable -ArgumentList $scrcpyArgs -PassThru
+
+    while (-not $process.HasExited) {
+      Write-Host ""
+      Write-Host "Mirror Session - $DeviceName" -ForegroundColor Cyan
+      Write-Host "1. Unlock Phone"
+      Write-Host "2. Unlock with Saved Credential"
+      Write-Host "3. Close Mirror"
+      Write-Host "0. Refresh"
+      $choice = Read-Host "Select option"
+
+      if ($process.HasExited) {
+        break
+      }
+
+      if ($choice -eq "1") {
+        Show-ManualUnlockMenu -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -DeviceKey $DeviceKey -DeviceName $DeviceName
+      }
+      elseif ($choice -eq "2") {
+        Show-SavedUnlockMenu -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -DeviceKey $DeviceKey
+      }
+      elseif ($choice -eq "3") {
+        Write-Host "Closing mirror..." -ForegroundColor Yellow
+        try {
+          if (-not $process.CloseMainWindow()) {
+            Stop-Process -Id $process.Id -Force
+          }
+          else {
+            Start-Sleep -Seconds 2
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+        }
+        catch {
+          Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+        break
+      }
+    }
+
+    if ($process) {
+      $process.WaitForExit()
+      $scrcpyExitCode = $process.ExitCode
+    }
   }
   finally {
     Restore-DimPhoneScreen -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -State $dimState
@@ -666,7 +1044,8 @@ if ($PairWireless) {
   }
   Write-Host "Clipboard sync is handled by scrcpy, so copy and paste should work while connected." -ForegroundColor Green
 
-  Start-ScrcpySession -AdbExecutable $adbPath -ScrcpyExecutable $scrcpyPath -DeviceSerial $wirelessReady -ConnectionArguments @() -OnSessionClosed {
+  $wirelessDeviceName = Get-ConnectedDeviceName -AdbExecutable $adbPath -DeviceSerial $wirelessReady
+  Start-ScrcpySession -AdbExecutable $adbPath -ScrcpyExecutable $scrcpyPath -DeviceSerial $wirelessReady -DeviceName $wirelessDeviceName -DeviceKey $wirelessDeviceName -ConnectionArguments @() -OnSessionClosed {
     Disconnect-WirelessAdb -AdbExecutable $adbPath -WirelessTarget $wirelessReady
   }
 }
@@ -741,7 +1120,8 @@ if ($Wireless) {
   }
   Write-Host "Clipboard sync is handled by scrcpy, so copy and paste should work while connected." -ForegroundColor Green
 
-  Start-ScrcpySession -AdbExecutable $adbPath -ScrcpyExecutable $scrcpyPath -DeviceSerial $wirelessTarget -ConnectionArguments @() -OnSessionClosed {
+  $wirelessDeviceName = Get-ConnectedDeviceName -AdbExecutable $adbPath -DeviceSerial $wirelessTarget
+  Start-ScrcpySession -AdbExecutable $adbPath -ScrcpyExecutable $scrcpyPath -DeviceSerial $wirelessTarget -DeviceName $wirelessDeviceName -DeviceKey $wirelessDeviceName -ConnectionArguments @() -OnSessionClosed {
     Disconnect-WirelessAdb -AdbExecutable $adbPath -WirelessTarget $wirelessTarget
   }
 }
@@ -768,4 +1148,5 @@ Write-Host "Clipboard sync is handled by scrcpy, so copy and paste should work w
 
 $deviceSerial = Get-DeviceSerial -ReadyDevices $readyDevices
 Save-DeviceRecord -AdbExecutable $adbPath -DeviceSerial $deviceSerial -ConnectionMode "USB" -PhoneIp (Get-DeviceIp -AdbExecutable $adbPath -DeviceSerial $deviceSerial)
-Start-ScrcpySession -AdbExecutable $adbPath -ScrcpyExecutable $scrcpyPath -DeviceSerial $deviceSerial -ConnectionArguments @()
+$usbDeviceName = Get-ConnectedDeviceName -AdbExecutable $adbPath -DeviceSerial $deviceSerial
+Start-ScrcpySession -AdbExecutable $adbPath -ScrcpyExecutable $scrcpyPath -DeviceSerial $deviceSerial -DeviceName $usbDeviceName -DeviceKey $usbDeviceName -ConnectionArguments @()
