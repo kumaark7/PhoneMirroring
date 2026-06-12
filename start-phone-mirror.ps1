@@ -713,17 +713,27 @@ function Invoke-PatternUnlock {
   $size = Get-DeviceScreenSize -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial
   $points = @($numbers | ForEach-Object { Get-PatternPoint -Number $_ -GridSize $GridSize -Width $size.Width -Height $size.Height })
 
+  Write-Host "Drawing pattern slowly..." -ForegroundColor Yellow
+
   $first = $points[0]
   Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "input", "motionevent", "DOWN", "$($first.X)", "$($first.Y)") -TimeoutSeconds 3 | Out-Null
-  Start-Sleep -Milliseconds 120
+  Start-Sleep -Milliseconds 350
 
-  for ($i = 1; $i -lt $points.Count; $i++) {
-    $point = $points[$i]
-    Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "input", "motionevent", "MOVE", "$($point.X)", "$($point.Y)") -TimeoutSeconds 3 | Out-Null
-    Start-Sleep -Milliseconds 120
+  for ($i = 0; $i -lt ($points.Count - 1); $i++) {
+    $from = $points[$i]
+    $to = $points[$i + 1]
+    $steps = 8
+
+    for ($step = 1; $step -le $steps; $step++) {
+      $x = [int]($from.X + (($to.X - $from.X) * $step / $steps))
+      $y = [int]($from.Y + (($to.Y - $from.Y) * $step / $steps))
+      Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "input", "motionevent", "MOVE", "$x", "$y") -TimeoutSeconds 3 | Out-Null
+      Start-Sleep -Milliseconds 110
+    }
   }
 
   $last = $points[-1]
+  Start-Sleep -Milliseconds 250
   Invoke-AdbWithTimeout -AdbExecutable $AdbExecutable -DeviceSerial $DeviceSerial -Arguments @("shell", "input", "motionevent", "UP", "$($last.X)", "$($last.Y)") -TimeoutSeconds 3 | Out-Null
 }
 
